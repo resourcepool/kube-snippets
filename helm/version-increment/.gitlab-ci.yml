@@ -1,0 +1,111 @@
+stages:
+  - external-triggers
+
+variables:
+  ACTION:
+    description: "Define specific action to perform from external-triggers. Valid values are: update_and_publish_chart, publish_chart"
+  TARGET_TYPE:
+    value: "snapshot"  # snapshot by default
+    description: "The target app type. Change this variable to 'release' if needed."
+  TARGETS:
+    description: "Multi-target goal. Each app should be described using chartpath:version and comma-separated. Ex: charts/mychart1:0.0.1,charts/mychart2:0.0.2"
+  TARGET_APP_VERSION:
+    # value: "0.0.0" # App version
+    description: "The application version to update (defaults to 0.0.0)"
+  TARGET_CHART_PATH:
+    # value: "." # Default Chart path
+    description: "The chart path (charts/nameofsubchart or . for root)"
+  DEPLOY:
+    value: 'true'
+    description: "Whether to deploy app after action is performed or not. Defaults to true"
+  TARGET_NAMESPACE:
+    value: "frog"
+    description: "Target namespace (for downstream deployment only)"
+
+# Variables
+# CHART_PATH
+# APP_VERSION
+# COMMIT_REF
+update-and-publish-chart:
+  image:
+    name: alpine:3.14
+    entrypoint: [""]
+  stage: external-triggers
+  before_script:
+    - apk add --no-cache git curl bash openssh-client
+    - apk add yq --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community
+    - mkdir ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    - echo "gitlab.com,172.65.251.78 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFSMqzJeV9rUzU4kWitGjeR4PWSa29SPqJ1fVkhtj3Hw9xjLVXVYrU9QlYWrOLXBpQ6KWjbjTDTdDkoohFzgbEY=" > ~/.ssh/known_hosts
+    - chmod 700 ~/.ssh/id_rsa
+    - chmod 700 ~/.ssh/known_hosts
+    - eval $(ssh-agent -s)
+    - git config --global user.email "ci@frogconnexion.com"
+    - git config --global user.name "Frog Connexion CI"
+    - echo $CI_PROJECT_PATH
+    - git clone git@gitlab.com:frog-connexion/frog-helm.git repo
+    - cd repo
+  script:
+    - bash increment_subchart_version.sh $TARGET_CHART_PATH $TARGET_APP_VERSION $TARGET_TYPE
+    - bash increment_mainchart_version.sh $TARGET_TYPE
+    - git add .
+    - git commit -m "[ci][chart-$NEXT_VERSION-$TARGET_TYPE] Bumped appVersion of $TARGET_CHART_PATH to $TARGET_APP_VERSION"
+    - git push -o ci.variable="ACTION=publish_chart" -o ci.variable="UPDATE_VERSION=false" origin main
+  rules:
+    - if: '$ACTION == "update_and_publish_chart" && $TARGET_TYPE && $TARGET_APP_VERSION && $TARGET_CHART_PATH'
+
+update-and-publish-chart-multi:
+  image:
+    name: alpine:3.14
+    entrypoint: [""]
+  stage: external-triggers
+  before_script:
+    - apk add --no-cache git curl bash openssh-client
+    - apk add yq --repository=http://dl-cdn.alpinelinux.org/alpine/edge/community
+    - mkdir ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo "$SSH_PRIVATE_KEY" | tr -d '\r' > ~/.ssh/id_rsa
+    - echo "gitlab.com,172.65.251.78 ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBFSMqzJeV9rUzU4kWitGjeR4PWSa29SPqJ1fVkhtj3Hw9xjLVXVYrU9QlYWrOLXBpQ6KWjbjTDTdDkoohFzgbEY=" > ~/.ssh/known_hosts
+    - chmod 700 ~/.ssh/id_rsa
+    - chmod 700 ~/.ssh/known_hosts
+    - eval $(ssh-agent -s)
+    - git config --global user.email "ci@frogconnexion.com"
+    - git config --global user.name "Frog Connexion CI"
+    - echo $CI_PROJECT_PATH
+    - git clone git@gitlab.com:frog-connexion/frog-helm.git repo
+    - cd repo
+  script:
+    - bash increment_multi_subchart_versions.sh $TARGETS $TARGET_TYPE
+    - bash increment_mainchart_version.sh $TARGET_TYPE
+    - export NEW_VERSION=$(echo "$(cat Chart.yaml)" | grep "version:" | awk '{print $2}')
+    - git add .
+    - git commit -m "[ci][chart-$NEW_VERSION-$TARGET_TYPE] Bumped app-versions for $TARGETS"
+    - git push -o ci.variable="ACTION=publish_chart" -o ci.variable="UPDATE_VERSION=false" origin main
+  rules:
+    - if: '$ACTION == "update_and_publish_chart" && $TARGETS'
+
+publish-chart:
+  image:
+    name: alpine/helm:3.6.3
+    entrypoint: [""]
+  stage: external-triggers
+  variables:
+    HELM_EXPERIMENTAL_OCI: 1
+    # this will change after helm 3.7 OCI spec will be implemented in gitlab and the rest of the universe.
+  script:
+    - '[[ ${UPDATE_VERSION} == "false" ]] && bash increment_mainchart_version.sh $TARGET_TYPE || echo "Skipping version update"'
+    - export TARGET_VERSION=$(echo "$(cat Chart.yaml)" | grep "version:" | awk '{print $2}')
+    - helm package .
+    - helm repo add --username gitlab+push-token-ci --password CXC2XqsvM-yaF9YijxRr gitlab https://gitlab.com/api/v4/projects/${CI_PROJECT_ID}/packages/helm/stable
+    - helm plugin install https://github.com/chartmuseum/helm-push.git
+    - helm cm-push --debug ./frog-connexion-${TARGET_VERSION}.tgz gitlab
+  rules:
+    - if: '$ACTION == "publish_chart" && $TARGET_TYPE'
+      changes:
+        - Chart.yaml
+      variables:
+        UPDATE_VERSION: "false"
+    - if: '$ACTION == "publish_chart" && $TARGET_TYPE'
+      variables:
+        UPDATE_VERSION: "true"
